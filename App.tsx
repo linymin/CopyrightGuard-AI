@@ -1,11 +1,9 @@
-
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, ShieldCheck, Image as ImageIcon, AlertTriangle, CheckCircle, RefreshCw, ChevronRight, FileWarning, BarChart3, Wand2, Fingerprint, Search, Trash2, History, Clock } from 'lucide-react';
+import { Upload, ShieldCheck, Image as ImageIcon, AlertTriangle, CheckCircle, RefreshCw, ChevronRight, FileWarning, BarChart3, Wand2, Fingerprint, Search, Trash2, CheckSquare, Square, Clock, ArrowRight, Copy, Check } from 'lucide-react';
 import { AppState, UploadedImage, AssessmentResult, AnalysisStatus, HistoryRecord } from './types';
-import { analyzeImageRisk, blobToBase64, refinePrompt, generateImageDescription, generateEmbedding, calculateCosineSimilarity } from './services/geminiService';
+import { analyzeImageRisk, blobToBase64, refinePrompt } from './services/geminiService';
 import { calculateImageHash, calculateHammingDistance } from './services/imageUtils';
 import RiskChart from './components/RiskChart';
-import LandingPage from './components/LandingPage';
 
 // Initial Mock Data for Gallery
 const INITIAL_GALLERY: UploadedImage[] = [
@@ -16,10 +14,11 @@ const INITIAL_GALLERY: UploadedImage[] = [
 ];
 
 const App: React.FC = () => {
-  const [appState, setAppState] = useState<AppState>(AppState.LANDING);
+  const [appState, setAppState] = useState<AppState>(AppState.GALLERY);
   const [gallery, setGallery] = useState<UploadedImage[]>(INITIAL_GALLERY);
   
-  // Selection for Batch Operations
+  // Gallery Management State
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [selectedGalleryIds, setSelectedGalleryIds] = useState<Set<string>>(new Set());
 
   // Assessment State
@@ -29,6 +28,7 @@ const App: React.FC = () => {
   const [selectedResult, setSelectedResult] = useState<AssessmentResult | null>(null);
   const [refinedPrompt, setRefinedPrompt] = useState<string | null>(null);
   const [isGeneratingPrompt, setIsGeneratingPrompt] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
 
   // History State
   const [history, setHistory] = useState<HistoryRecord[]>([]);
@@ -37,62 +37,27 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
 
-  // Background Indexing & Hashing Loop
+  // Initialize gallery hashes if missing
   useEffect(() => {
-    const processQueue = async () => {
-      const needsProcessing = gallery.find(img => !img.hash || !img.indexingStatus);
-      
-      if (needsProcessing) {
-        const updatedGallery = [...gallery];
-        const index = updatedGallery.findIndex(img => img.id === needsProcessing.id);
-        
-        if (index === -1) return;
-
-        // 1. Calculate pHash (if missing)
-        if (!updatedGallery[index].hash) {
-            try {
-                updatedGallery[index].hash = await calculateImageHash(updatedGallery[index].url);
-            } catch (e) {
-                console.warn("Hash failed for", updatedGallery[index].name);
-            }
+    const enrichGallery = async () => {
+      let changed = false;
+      const enriched = await Promise.all(gallery.map(async (img) => {
+        if (!img.hash) {
+          try {
+            const hash = await calculateImageHash(img.url);
+            changed = true;
+            return { ...img, hash };
+          } catch (e) {
+            console.warn("Failed to hash gallery image", img.id, e);
+            return img;
+          }
         }
-
-        // 2. Generate Semantic Index (if missing)
-        if (!updatedGallery[index].indexingStatus) {
-            updatedGallery[index].indexingStatus = 'processing';
-            setGallery([...updatedGallery]); // Force update UI
-
-            try {
-                const mime = updatedGallery[index].url.startsWith('data:') 
-                    ? updatedGallery[index].url.match(/^data:(.*?);base64,/)?.[1] || 'image/jpeg'
-                    : 'image/jpeg';
-                
-                const base64 = updatedGallery[index].url.startsWith('data:')
-                    ? updatedGallery[index].url.split(',')[1]
-                    : await (await fetch(updatedGallery[index].url)).blob().then(blobToBase64);
-
-                // Generate Description & Embedding
-                const description = await generateImageDescription(base64, mime);
-                const embedding = await generateEmbedding(description);
-
-                // Update Entry
-                updatedGallery[index].description = description;
-                updatedGallery[index].embedding = embedding;
-                updatedGallery[index].indexingStatus = 'completed';
-            } catch (e) {
-                console.error("Indexing failed", e);
-                updatedGallery[index].indexingStatus = 'failed';
-            }
-        }
-        
-        setGallery([...updatedGallery]);
-      }
+        return img;
+      }));
+      if (changed) setGallery(enriched);
     };
-
-    const interval = setInterval(processQueue, 1000);
-    return () => clearInterval(interval);
-  }, [gallery]);
-
+    enrichGallery();
+  }, [gallery.length]);
 
   // --- Handlers ---
 
@@ -103,34 +68,43 @@ const App: React.FC = () => {
         const file = e.target.files[i];
         const base64 = await blobToBase64(file);
         const url = `data:${file.type};base64,${base64}`;
-        
+        let hash = undefined;
+        try {
+           hash = await calculateImageHash(url);
+        } catch (e) {
+           console.error("Hash calculation failed", e);
+        }
+
         newImages.push({
           id: `new_${Date.now()}_${i}`,
           url,
           name: file.name,
           uploadedAt: Date.now(),
-          indexingStatus: undefined // Will trigger background processor
+          hash
         });
       }
-      setGallery([...gallery, ...newImages]);
+      setGallery(prev => [...prev, ...newImages]);
     }
   };
 
   const toggleGallerySelection = (id: string) => {
     const newSet = new Set(selectedGalleryIds);
     if (newSet.has(id)) {
-        newSet.delete(id);
+      newSet.delete(id);
     } else {
-        newSet.add(id);
+      newSet.add(id);
     }
     setSelectedGalleryIds(newSet);
   };
 
-  const deleteSelectedGalleryItems = () => {
-    if (confirm(`确定要删除选中的 ${selectedGalleryIds.size} 张样本图片吗？`)) {
-        setGallery(gallery.filter(g => !selectedGalleryIds.has(g.id)));
-        setSelectedGalleryIds(new Set());
-    }
+  const deleteSelectedGalleryImages = () => {
+    // Use functional update to ensure we have the latest state
+    setGallery(currentGallery => {
+      const remaining = currentGallery.filter(img => !selectedGalleryIds.has(img.id));
+      return remaining;
+    });
+    setSelectedGalleryIds(new Set());
+    setIsSelectionMode(false);
   };
 
   const handleTargetUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -170,145 +144,116 @@ const App: React.FC = () => {
     if (!targetImage || gallery.length === 0) return;
 
     setStatus({ step: 'analyzing', progress: 0 });
+    setResults([]); // Clear previous results
     
-    // 1. Generate Target Vector for RAG
-    setStatus({ step: 'analyzing', progress: 5, currentFile: "正在预处理..." });
     const targetMime = getMimeTypeFromUrl(targetImage.url);
     const targetBase64 = targetImage.url.split(',')[1];
     
-    let targetEmbedding: number[] = [];
-    try {
-        const desc = await generateImageDescription(targetBase64, targetMime);
-        targetEmbedding = await generateEmbedding(desc);
-    } catch (e) {
-        console.warn("Target embedding failed, falling back to full scan");
-    }
+    // Increased batch size for speed (Gemini Flash has good throughput)
+    const BATCH_SIZE = 4;
+    const totalRefs = gallery.length;
+    let processedCount = 0;
 
-    // 2. Select Candidates (RAG Step)
-    let candidates = gallery;
-    
-    // If gallery is small, SCAN ALL (Adaptive Strategy)
-    if (gallery.length > 20 && targetEmbedding.length > 0) {
-        setStatus({ step: 'analyzing', progress: 10, currentFile: "正在进行全库向量检索..." });
-        
-        const scoredCandidates = gallery.map(img => {
-            // pHash priority
-            if (targetImage.hash && img.hash) {
-                const dist = calculateHammingDistance(targetImage.hash, img.hash);
-                if (dist >= 0 && dist <= 8) return { img, score: 999 }; // Force include
-            }
-            // Vector Sim
-            if (img.embedding) {
-                return { img, score: calculateCosineSimilarity(targetEmbedding, img.embedding) };
-            }
-            return { img, score: 0 };
-        });
-        
-        // Take Top 10
-        candidates = scoredCandidates
-            .sort((a, b) => b.score - a.score)
-            .slice(0, 10)
-            .map(c => c.img);
-    }
+    const accumulatedResults: AssessmentResult[] = [];
 
-    // 3. Batch Analysis
-    const BATCH_SIZE = 3;
-    const allResults: AssessmentResult[] = [];
-    const totalCandidates = candidates.length;
-
-    for (let i = 0; i < totalCandidates; i += BATCH_SIZE) {
-      const batch = candidates.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < totalRefs; i += BATCH_SIZE) {
+      const batch = gallery.slice(i, i + BATCH_SIZE);
       
       const batchPromises = batch.map(async (refImg) => {
-        // Wrap logic in a task to allow timeout
-        const analysisTask = async () => {
-            // pHash Check
-            let isPHashMatch = false;
-            if (targetImage.hash && refImg.hash) {
-              const hashDist = calculateHammingDistance(targetImage.hash, refImg.hash);
-              if (hashDist >= 0 && hashDist <= 8) isPHashMatch = true;
-            }
-
-            let refBase64 = '';
-            let refMime = 'image/jpeg';
-
-            if (refImg.url.startsWith('data:')) {
-                refMime = getMimeTypeFromUrl(refImg.url);
-                refBase64 = refImg.url.split(',')[1];
-            } else {
-                try {
-                   const response = await fetch(refImg.url);
-                   const blob = await response.blob();
-                   refMime = blob.type;
-                   refBase64 = await blobToBase64(blob);
-                } catch (e) {
-                   return null;
-                }
-            }
-
-            return analyzeImageRisk(
-              targetBase64, 
-              targetMime, 
-              refBase64, 
-              refMime, 
-              refImg.id, 
-              isPHashMatch
-            );
-        };
-
-        // Enforce 20s timeout per image to prevent hanging
-        try {
-            return await Promise.race([
-                analysisTask(),
-                new Promise<AssessmentResult | null>(resolve => setTimeout(() => resolve(null), 20000))
-            ]);
-        } catch (e) {
-            console.error("Batch processing error", e);
-            return null;
+        // 1. pHash Check
+        let isPHashMatch = false;
+        let hashDist = -1;
+        
+        if (targetImage.hash && refImg.hash) {
+          hashDist = calculateHammingDistance(targetImage.hash, refImg.hash);
+          if (hashDist >= 0 && hashDist <= 8) { 
+            isPHashMatch = true;
+          }
         }
+
+        let refBase64 = '';
+        let refMime = 'image/jpeg';
+
+        if (refImg.url.startsWith('data:')) {
+            refMime = getMimeTypeFromUrl(refImg.url);
+            refBase64 = refImg.url.split(',')[1];
+        } else {
+            try {
+               const response = await fetch(refImg.url);
+               const blob = await response.blob();
+               refMime = blob.type;
+               refBase64 = await blobToBase64(blob);
+            } catch (e) {
+               console.warn("Could not fetch remote reference image", refImg.name);
+               return null;
+            }
+        }
+
+        // Add timeout to prevent hanging
+        const analysisPromise = analyzeImageRisk(
+          targetBase64, 
+          targetMime, 
+          refBase64, 
+          refMime, 
+          refImg.id, 
+          isPHashMatch
+        );
+        
+        const timeoutPromise = new Promise<null>((resolve) => 
+           setTimeout(() => resolve(null), 45000)
+        );
+
+        return Promise.race([analysisPromise, timeoutPromise]);
       });
 
+      // Update generic status message
       setStatus({ 
         step: 'analyzing', 
-        progress: 20 + Math.floor(((i + 1) / totalCandidates) * 80),
+        progress: Math.floor(((processedCount) / totalRefs) * 100),
         currentFile: "正在进行深度风险比对..." 
       });
 
       const batchResults = await Promise.all(batchPromises);
-      batchResults.forEach(r => {
-        if (r && r.scores.total > 0) allResults.push(r);
+      
+      // Filter valid results
+      const validResults = batchResults.filter((r): r is AssessmentResult => r !== null && r.scores.total > 0);
+      
+      // Add new results to accumulator
+      accumulatedResults.push(...validResults);
+      
+      // Sort: pHash match first, then by score descending
+      accumulatedResults.sort((a, b) => {
+        if (a.pHashMatch && !b.pHashMatch) return -1;
+        if (!a.pHashMatch && b.pHashMatch) return 1;
+        return b.scores.total - a.scores.total;
       });
+
+      // Incrementally update UI state so user sees results coming in
+      setResults([...accumulatedResults]);
+      
+      // Auto-select first high-risk result if not already selected
+      if (!selectedResult && accumulatedResults.length > 0) {
+        setSelectedResult(accumulatedResults[0]);
+      }
+
+      processedCount += batch.length;
+
+      // Reduced delay for better performance, relying on retryWithBackoff for 429s
+      if (i + BATCH_SIZE < totalRefs) {
+         await new Promise(r => setTimeout(r, 500)); 
+      }
     }
 
     setStatus({ step: 'complete', progress: 100 });
     
-    // Sort Results
-    allResults.sort((a, b) => {
-      if (a.pHashMatch && !b.pHashMatch) return -1;
-      if (!a.pHashMatch && b.pHashMatch) return 1;
-      return b.scores.total - a.scores.total;
-    });
-    
-    setResults(allResults);
-    if (allResults.length > 0) {
-      setSelectedResult(allResults[0]);
-    }
-
-    // Save to History
-    const maxScore = allResults.length > 0 ? allResults[0].scores.total : 0;
-    const summary = allResults.length > 0 
-        ? (allResults[0].scores.total >= 60 ? '发现高风险匹配' : '低风险相似')
-        : '安全 - 未发现风险';
-
-    const newHistory: HistoryRecord = {
-        id: Date.now().toString(),
-        timestamp: Date.now(),
-        targetImage: targetImage,
-        results: allResults,
-        maxScore,
-        summary
+    // Final save to History
+    const newHistoryRecord: HistoryRecord = {
+      id: `hist_${Date.now()}`,
+      timestamp: Date.now(),
+      targetImage: targetImage,
+      results: accumulatedResults
     };
-    setHistory(prev => [newHistory, ...prev].slice(0, 10)); // Keep last 10
+    setHistory(prev => [newHistoryRecord, ...prev].slice(0, 10)); // Keep last 10
   };
 
   const handleGeneratePrompt = async () => {
@@ -317,6 +262,7 @@ const App: React.FC = () => {
     try {
       const prompt = await refinePrompt(selectedResult.modificationSuggestion);
       setRefinedPrompt(prompt);
+      setIsCopied(false);
     } catch (e) {
       console.error(e);
     } finally {
@@ -324,17 +270,20 @@ const App: React.FC = () => {
     }
   };
 
-  const loadHistoryItem = (record: HistoryRecord) => {
-      setTargetImage(record.targetImage);
-      setResults(record.results);
-      if (record.results.length > 0) {
-          setSelectedResult(record.results[0]);
-      } else {
-          setSelectedResult(null);
-      }
-      setRefinedPrompt(null);
-      setStatus({ step: 'complete', progress: 100 });
-      setAppState(AppState.ASSESS);
+  const handleCopyPrompt = () => {
+    if (refinedPrompt) {
+      navigator.clipboard.writeText(refinedPrompt);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    }
+  };
+
+  const restoreHistory = (record: HistoryRecord) => {
+    setTargetImage(record.targetImage);
+    setResults(record.results);
+    setSelectedResult(record.results.length > 0 ? record.results[0] : null);
+    setStatus({ step: 'complete', progress: 100 });
+    setAppState(AppState.ASSESS);
   };
 
   // --- Render Helpers ---
@@ -345,68 +294,81 @@ const App: React.FC = () => {
         <div>
           <h2 className="text-2xl font-bold text-slate-800">比对样本库</h2>
           <p className="text-slate-500 text-sm mt-1">
-            已存储 {gallery.length} 张样本图片。系统自动提取语义描述并建立向量索引。
+            已建立索引 {gallery.length} 张样本图片。系统将自动进行像素级查重和 AI 语义比对。
           </p>
         </div>
         <div className="flex gap-2">
-            {selectedGalleryIds.size > 0 && (
-                <button 
-                  onClick={deleteSelectedGalleryItems}
-                  className="flex items-center gap-2 bg-red-50 hover:bg-red-100 text-red-600 px-4 py-2 rounded-lg transition-colors border border-red-200"
-                >
-                  <Trash2 size={18} />
-                  <span>删除 ({selectedGalleryIds.size})</span>
-                </button>
-            )}
+          {isSelectionMode ? (
+            <>
+              <button 
+                onClick={deleteSelectedGalleryImages}
+                disabled={selectedGalleryIds.size === 0}
+                className="flex items-center gap-2 bg-red-100 hover:bg-red-200 text-red-600 px-4 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Trash2 size={18} />
+                <span>删除 ({selectedGalleryIds.size})</span>
+              </button>
+              <button 
+                onClick={() => { setIsSelectionMode(false); setSelectedGalleryIds(new Set()); }}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-lg transition-colors"
+              >
+                取消
+              </button>
+            </>
+          ) : (
             <button 
-              onClick={() => galleryInputRef.current?.click()}
-              className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg transition-colors"
+              onClick={() => setIsSelectionMode(true)}
+              className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg transition-colors"
             >
-              <Upload size={18} />
-              <span>批量入库</span>
+              批量管理
             </button>
+          )}
+          <button 
+            onClick={() => galleryInputRef.current?.click()}
+            className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg transition-colors"
+          >
+            <Upload size={18} />
+            <span>批量入库</span>
+          </button>
+          <input 
+            type="file" 
+            multiple 
+            ref={galleryInputRef} 
+            className="hidden" 
+            accept="image/*" 
+            onChange={handleGalleryUpload} 
+          />
         </div>
-        <input 
-          type="file" 
-          multiple 
-          ref={galleryInputRef} 
-          className="hidden" 
-          accept="image/*" 
-          onChange={handleGalleryUpload} 
-        />
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
         {gallery.map((img) => (
           <div 
             key={img.id} 
-            className={`group relative aspect-square bg-white rounded-xl overflow-hidden border transition-all cursor-pointer ${selectedGalleryIds.has(img.id) ? 'border-blue-500 ring-2 ring-blue-500 ring-offset-2' : 'border-slate-200 hover:shadow-md'}`}
-            onClick={() => toggleGallerySelection(img.id)}
+            onClick={() => isSelectionMode && toggleGallerySelection(img.id)}
+            className={`group relative aspect-square bg-white rounded-xl overflow-hidden border shadow-sm hover:shadow-md transition-all cursor-pointer ${
+              isSelectionMode && selectedGalleryIds.has(img.id) ? 'ring-2 ring-blue-500 border-transparent' : 'border-slate-200'
+            }`}
           >
             <img src={img.url} alt={img.name} className="w-full h-full object-cover" />
             
-            {/* Indexing Status Overlay */}
-            {img.indexingStatus !== 'completed' && (
-                <div className="absolute top-2 left-2">
-                    {img.indexingStatus === 'processing' && <RefreshCw size={14} className="text-blue-500 animate-spin" />}
-                    {img.indexingStatus === 'failed' && <AlertTriangle size={14} className="text-red-500" />}
-                </div>
-            )}
-            
+            {/* Overlay for Name */}
             <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3">
               <span className="text-white text-xs font-medium truncate w-full">{img.name}</span>
-              {/* Semantic Check Visual */}
-              {img.description && (
-                  <span className="text-green-300 text-[10px] flex items-center gap-1 mt-1">
-                      <CheckCircle size={10} /> 语义已索引
-                  </span>
-              )}
             </div>
-            
-            {/* Selection Checkbox Visual */}
-            <div className={`absolute top-2 right-2 w-5 h-5 rounded-full border border-white shadow-sm flex items-center justify-center transition-colors ${selectedGalleryIds.has(img.id) ? 'bg-blue-500' : 'bg-black/30'}`}>
-                {selectedGalleryIds.has(img.id) && <CheckCircle size={12} className="text-white" />}
-            </div>
+
+            {/* Selection Checkbox */}
+            {isSelectionMode && (
+              <div className="absolute top-2 left-2 text-blue-500 bg-white rounded-md p-0.5 shadow-sm">
+                 {selectedGalleryIds.has(img.id) ? <CheckSquare size={20} fill="currentColor" className="text-blue-500 bg-white" /> : <Square size={20} className="text-slate-400" />}
+              </div>
+            )}
+
+            {!isSelectionMode && (
+              <div className="absolute top-2 right-2 bg-green-500 text-white text-[10px] px-2 py-0.5 rounded-full font-bold shadow-sm">
+                样本
+              </div>
+            )}
           </div>
         ))}
         
@@ -415,55 +377,9 @@ const App: React.FC = () => {
           className="aspect-square bg-slate-50 rounded-xl border-2 border-dashed border-slate-300 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
         >
           <Upload size={32} />
-          <span className="text-sm mt-2 font-medium">添加样本</span>
+          <span className="text-sm mt-2 font-medium">添加图片</span>
         </div>
       </div>
-    </div>
-  );
-
-  const renderHistory = () => (
-    <div className="p-6 max-w-4xl mx-auto">
-      <h2 className="text-2xl font-bold text-slate-800 mb-6 flex items-center gap-2">
-          <History size={24} />
-          历史查询记录 (最近10条)
-      </h2>
-      
-      {history.length === 0 ? (
-          <div className="text-center py-12 bg-white rounded-xl border border-slate-200 text-slate-400">
-              <Clock size={40} className="mx-auto mb-3 opacity-50" />
-              <p>暂无历史查询记录</p>
-          </div>
-      ) : (
-          <div className="space-y-4">
-              {history.map((record) => (
-                  <div key={record.id} className="bg-white rounded-xl border border-slate-200 p-4 flex items-center gap-4 hover:shadow-md transition-shadow">
-                      <div className="w-16 h-16 rounded-lg bg-slate-100 overflow-hidden shrink-0 border border-slate-100">
-                          <img src={record.targetImage.url} alt="Target" className="w-full h-full object-cover" />
-                      </div>
-                      <div className="flex-1">
-                          <div className="flex justify-between items-center mb-1">
-                              <span className="text-sm font-bold text-slate-900">{record.targetImage.name}</span>
-                              <span className="text-xs text-slate-400">{new Date(record.timestamp).toLocaleString()}</span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                              <span className={`text-xs font-bold px-2 py-0.5 rounded ${
-                                  record.maxScore >= 60 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'
-                              }`}>
-                                  {record.maxScore}分
-                              </span>
-                              <span className="text-xs text-slate-600">{record.summary}</span>
-                          </div>
-                      </div>
-                      <button 
-                          onClick={() => loadHistoryItem(record)}
-                          className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-bold rounded-lg transition-colors"
-                      >
-                          查看详情
-                      </button>
-                  </div>
-              ))}
-          </div>
-      )}
     </div>
   );
 
@@ -526,7 +442,7 @@ const App: React.FC = () => {
                 className="w-full mt-4 bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg font-bold flex items-center justify-center gap-2 transition-all shadow-md shadow-blue-200 active:scale-95"
               >
                 <Search size={18} />
-                开始全库扫描
+                开始智能分析
               </button>
             )}
 
@@ -640,15 +556,10 @@ const App: React.FC = () => {
                    </div>
                 </div>
                 <div>
-                   <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 block">样本库原图 (受保护)</span>
+                   <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 block">库中原图 (受保护)</span>
                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-2">
                      <img src={matchedRefImage.url} className="w-full h-64 object-contain" />
                    </div>
-                   {matchedRefImage.description && (
-                       <div className="mt-2 text-[10px] text-slate-500 bg-slate-50 p-2 rounded border border-slate-100 line-clamp-2" title={matchedRefImage.description}>
-                           <span className="font-bold">AI 语义分析:</span> {matchedRefImage.description}
-                       </div>
-                   )}
                 </div>
               </div>
 
@@ -724,7 +635,7 @@ const App: React.FC = () => {
 
                   <div className="bg-gradient-to-r from-indigo-50 to-white border border-indigo-100 rounded-2xl p-6">
                     <div className="mb-6">
-                      <h4 className="text-sm font-bold text-indigo-900 uppercase tracking-wide mb-2">修改建议</h4>
+                      <h4 className="text-sm font-bold text-indigo-900 uppercase tracking-wide mb-2">原始修改建议</h4>
                       <p className="text-indigo-800 font-medium">
                         {selectedResult.modificationSuggestion || "建议调整构图视角和主要配色，以产生差异化。"}
                       </p>
@@ -739,30 +650,35 @@ const App: React.FC = () => {
                          {isGeneratingPrompt ? (
                            <>
                              <RefreshCw className="animate-spin" size={18} />
-                             生成中...
+                             正在分析...
                            </>
                          ) : (
                            <>
                             <Wand2 size={18} />
-                            生成即梦AI/MJ中文提示词
+                            获取具体的提示词修改策略 (中文)
                            </>
                          )}
                       </button>
                     ) : (
                       <div className="bg-white rounded-xl border border-indigo-200 p-5 shadow-sm">
                         <div className="flex justify-between items-center mb-3">
-                           <span className="text-xs font-bold text-indigo-500 uppercase">规避风险专用提示词 (中文)</span>
+                           <span className="text-xs font-bold text-indigo-500 uppercase">提示词修改建议 (Prompt Advice)</span>
                            <button onClick={() => setRefinedPrompt(null)} className="text-xs text-indigo-600 hover:underline">刷新</button>
                         </div>
-                        <div className="text-slate-600 text-sm font-mono bg-slate-50 p-3 rounded mb-4 border border-slate-100 whitespace-pre-wrap">
+                        <div className="text-slate-700 text-sm leading-relaxed whitespace-pre-wrap bg-slate-50 p-4 rounded-lg mb-4 border border-slate-100">
                           {refinedPrompt}
                         </div>
                         <div className="flex gap-3">
                           <button 
-                             onClick={() => navigator.clipboard.writeText(refinedPrompt)}
-                             className="flex-1 bg-slate-900 text-white text-sm font-bold py-2 rounded-lg hover:bg-slate-800"
+                            onClick={handleCopyPrompt}
+                            className={`flex-1 flex items-center justify-center gap-2 text-sm font-bold py-2 rounded-lg transition-all ${
+                              isCopied 
+                                ? 'bg-green-600 text-white' 
+                                : 'bg-slate-900 text-white hover:bg-slate-800'
+                            }`}
                           >
-                            复制提示词
+                            {isCopied ? <Check size={16} /> : <Copy size={16} />}
+                            {isCopied ? '已复制' : '复制建议'}
                           </button>
                         </div>
                       </div>
@@ -785,19 +701,78 @@ const App: React.FC = () => {
     );
   };
 
-  // If in Landing state, render LandingPage
-  if (appState === AppState.LANDING) {
-    return <LandingPage onEnterApp={() => setAppState(AppState.ASSESS)} />;
-  }
+  const renderHistory = () => (
+    <div className="p-6 max-w-5xl mx-auto">
+      <div className="mb-6">
+        <h2 className="text-2xl font-bold text-slate-800">历史查询记录</h2>
+        <p className="text-slate-500 text-sm mt-1">
+          最近 10 次的风险评估记录。点击可查看详细报告。
+        </p>
+      </div>
+
+      {history.length === 0 ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-12 text-center text-slate-400">
+          <Clock size={48} className="mx-auto mb-4 opacity-50" />
+          <p>暂无查询记录</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {history.map((record) => {
+            const highRiskCount = record.results.filter(r => r.scores.total >= 60).length;
+            const topScore = record.results.length > 0 
+                ? Math.max(...record.results.map(r => r.scores.total)) 
+                : 0;
+
+            return (
+              <div 
+                key={record.id} 
+                onClick={() => restoreHistory(record)}
+                className="bg-white rounded-xl border border-slate-200 p-4 hover:shadow-md transition-shadow cursor-pointer flex items-center gap-4"
+              >
+                <div className="w-20 h-20 bg-slate-100 rounded-lg overflow-hidden shrink-0">
+                  <img src={record.targetImage.url} alt="Thumbnail" className="w-full h-full object-cover" />
+                </div>
+                
+                <div className="flex-1">
+                  <div className="flex justify-between items-start">
+                     <h3 className="font-bold text-slate-800 text-lg mb-1">{record.targetImage.name}</h3>
+                     <span className="text-xs text-slate-400">
+                       {new Date(record.timestamp).toLocaleString('zh-CN')}
+                     </span>
+                  </div>
+                  
+                  <div className="flex gap-4 mt-2">
+                    <div className="flex flex-col">
+                      <span className="text-xs text-slate-500 uppercase font-bold">最高风险分</span>
+                      <span className={`text-lg font-bold ${topScore >= 60 ? 'text-red-500' : 'text-green-500'}`}>
+                        {topScore}
+                      </span>
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-xs text-slate-500 uppercase font-bold">高风险匹配</span>
+                      <span className={`text-lg font-bold ${highRiskCount > 0 ? 'text-red-500' : 'text-slate-700'}`}>
+                        {highRiskCount} 张
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 p-2 rounded-full text-slate-400 group-hover:text-blue-500 transition-colors">
+                  <ArrowRight size={24} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900">
       <header className="bg-white border-b border-slate-200 sticky top-0 z-50 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div 
-            onClick={() => setAppState(AppState.LANDING)}
-            className="flex items-center gap-2.5 cursor-pointer hover:opacity-80 transition-opacity"
-          >
+          <div className="flex items-center gap-2.5">
             <div className="bg-slate-900 text-white p-2 rounded-lg shadow-md shadow-slate-200">
               <ShieldCheck size={20} />
             </div>
@@ -806,22 +781,22 @@ const App: React.FC = () => {
             </span>
           </div>
           
-          <div className="flex bg-slate-100 p-1 rounded-lg">
+          <div className="flex bg-slate-100 p-1 rounded-lg overflow-x-auto">
             <button 
               onClick={() => setAppState(AppState.GALLERY)}
-              className={`px-5 py-1.5 rounded-md text-sm font-bold transition-all ${appState === AppState.GALLERY ? 'bg-white text-slate-900 shadow-sm ring-1 ring-black/5' : 'text-slate-500 hover:text-slate-700'}`}
+              className={`px-5 py-1.5 rounded-md text-sm font-bold transition-all whitespace-nowrap ${appState === AppState.GALLERY ? 'bg-white text-slate-900 shadow-sm ring-1 ring-black/5' : 'text-slate-500 hover:text-slate-700'}`}
             >
               样本库
             </button>
             <button 
               onClick={() => setAppState(AppState.ASSESS)}
-              className={`px-5 py-1.5 rounded-md text-sm font-bold transition-all ${appState === AppState.ASSESS ? 'bg-white text-slate-900 shadow-sm ring-1 ring-black/5' : 'text-slate-500 hover:text-slate-700'}`}
+              className={`px-5 py-1.5 rounded-md text-sm font-bold transition-all whitespace-nowrap ${appState === AppState.ASSESS ? 'bg-white text-slate-900 shadow-sm ring-1 ring-black/5' : 'text-slate-500 hover:text-slate-700'}`}
             >
               智能鉴别
             </button>
             <button 
               onClick={() => setAppState(AppState.HISTORY)}
-              className={`px-5 py-1.5 rounded-md text-sm font-bold transition-all ${appState === AppState.HISTORY ? 'bg-white text-slate-900 shadow-sm ring-1 ring-black/5' : 'text-slate-500 hover:text-slate-700'}`}
+              className={`px-5 py-1.5 rounded-md text-sm font-bold transition-all whitespace-nowrap ${appState === AppState.HISTORY ? 'bg-white text-slate-900 shadow-sm ring-1 ring-black/5' : 'text-slate-500 hover:text-slate-700'}`}
             >
               历史查询
             </button>

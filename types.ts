@@ -5,9 +5,6 @@ export interface UploadedImage {
   name: string;
   uploadedAt: number;
   hash?: string; // dHash string for fast pre-screening
-  description?: string; // AI generated semantic description
-  embedding?: number[]; // Vector embedding
-  indexingStatus?: 'pending' | 'processing' | 'completed' | 'failed';
 }
 
 export interface RiskScores {
@@ -41,12 +38,9 @@ export interface HistoryRecord {
   timestamp: number;
   targetImage: UploadedImage;
   results: AssessmentResult[];
-  maxScore: number;
-  summary: string;
 }
 
 export enum AppState {
-  LANDING = 'LANDING',
   GALLERY = 'GALLERY',
   ASSESS = 'ASSESS',
   HISTORY = 'HISTORY',
