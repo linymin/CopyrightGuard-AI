@@ -1,5 +1,4 @@
-
-import { GoogleGenAI, Type, Schema } from "@google/genai";
+import { GoogleGenAI, Type, Schema, GenerateContentResponse } from "@google/genai";
 import { AssessmentResult } from '../types';
 
 // Initialize Gemini Client
@@ -19,6 +18,38 @@ export const blobToBase64 = (blob: Blob): Promise<string> => {
     reader.readAsDataURL(blob);
   });
 };
+
+/**
+ * Utility to handle 429 Rate Limit errors with exponential backoff
+ */
+async function retryWithBackoff<T>(
+    operation: () => Promise<T>,
+    retries = 5,
+    delay = 2000
+): Promise<T> {
+    try {
+        return await operation();
+    } catch (error: any) {
+        // Robust check for Rate Limit / Resource Exhausted errors
+        // The error object might be wrapped or contain specific properties
+        const errorCode = error?.status || error?.code || error?.error?.code;
+        const errorMessage = error?.message || (typeof error === 'object' ? JSON.stringify(error) : String(error));
+        
+        const isRateLimit = 
+            errorCode === 429 || 
+            errorMessage.includes('429') || 
+            errorMessage.includes('RESOURCE_EXHAUSTED') ||
+            errorMessage.includes('Quota exceeded') ||
+            errorMessage.includes('rate limit');
+
+        if (retries > 0 && isRateLimit) {
+            console.warn(`Rate limit hit (Code: ${errorCode}). Retrying in ${delay}ms... (Attempts left: ${retries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return retryWithBackoff(operation, retries - 1, delay * 2);
+        }
+        throw error;
+    }
+}
 
 // Response Schema for Risk Assessment
 const riskAssessmentSchema: Schema = {
@@ -102,7 +133,7 @@ export async function analyzeImageRisk(
   try {
     const prompt = `
       角色：你是一位极其严苛的【AIGC版权法务鉴定专家】。
-      任务：对比【图片A（待测图）】与【图片B（样本库原图）】，分析侵权风险。
+      任务：对比【图片A（待测图）】与【图片B（企业原图）】，分析侵权风险。
 
       前置校验：
       系统底层像素哈希（pHash）匹配结果：${isPHashMatch ? "**【匹配】(距离<=5，极大概率为同一图或微改图)**" : "【未匹配】(无直接像素复制)"}
@@ -133,7 +164,7 @@ export async function analyzeImageRisk(
       请输出 JSON 报告。Evidence 数组必须包含具体的视觉证据（例如：“两张图中的人物姿势完全重叠”、“背景左上角都有一个红色的气球”）。
     `;
 
-    const response = await ai.models.generateContent({
+    const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: {
         parts: [
@@ -147,7 +178,7 @@ export async function analyzeImageRisk(
         responseSchema: riskAssessmentSchema,
         temperature: 0.2 // Lower temperature for more analytical/consistent results
       }
-    });
+    }));
 
     const result = JSON.parse(response.text || '{}');
 
@@ -188,86 +219,25 @@ export async function analyzeImageRisk(
 }
 
 /**
- * Generates a visual description for indexing.
- * optimized for search keywords.
- */
-export async function generateImageDescription(base64: string, mimeType: string): Promise<string> {
-    try {
-        const prompt = "Generate a dense list of visual keywords and a 1-sentence summary for this image. Include: Subject, Main Colors, Art Style, Composition, Key Objects. Do not use filler words. Format: 'Subject: ... | Style: ... | Keywords: ...'";
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: {
-                parts: [
-                    { text: prompt },
-                    { inlineData: { mimeType, data: base64 } }
-                ]
-            }
-        });
-        return response.text || "";
-    } catch (e) {
-        console.error("Description generation failed", e);
-        return "";
-    }
-}
-
-/**
- * Generates vector embedding for text.
- */
-export async function generateEmbedding(text: string): Promise<number[]> {
-    try {
-        const result = await ai.models.embedContent({
-            model: 'text-embedding-004',
-            contents: { parts: [{ text }] }
-        });
-        return result.embedding?.values || [];
-    } catch (e) {
-        console.error("Embedding failed", e);
-        return [];
-    }
-}
-
-/**
- * Calculates Cosine Similarity between two vectors.
- */
-export function calculateCosineSimilarity(vecA: number[], vecB: number[]): number {
-    if (vecA.length !== vecB.length) return 0;
-    
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    
-    for (let i = 0; i < vecA.length; i++) {
-        dotProduct += vecA[i] * vecB[i];
-        normA += vecA[i] * vecA[i];
-        normB += vecB[i] * vecB[i];
-    }
-    
-    if (normA === 0 || normB === 0) return 0;
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
-/**
- * Generates a new image prompt based on the suggestion to avoid copyright.
- * NOW IN CHINESE.
+ * Generates specific prompt modification advice in Chinese.
  */
 export async function refinePrompt(originalSuggestion: string): Promise<string> {
     const prompt = `
-      任务：基于以下“版权风险规避建议”，编写一段**中文提示词（Prompt）**。
-      目标用户：使用“即梦AI (Jimeng AI)”、“Midjourney”等工具的中文用户。
-      
-      规避建议：${originalSuggestion}
+      任务：基于AI给出的【版权规避建议】，请为用户提供具体的【提示词修改策略】（Prompt Modification Strategy）。
       
       要求：
-      1. **必须输出中文**。
-      2. 格式清晰，包含【主体】、【环境】、【风格】、【构图】等标签。
-      3. 确保新的提示词能生成高质量图片，同时有效规避原图的版权风险（例如改变构图视角、光影、配色）。
-      4. 直接输出提示词内容，不要有多余的寒暄。
+      1. **语言**：必须使用中文。
+      2. **核心目标**：指导用户如何修改生成式AI的提示词（如 Midjourney / Stable Diffusion）来规避版权风险。
+      3. **内容**：不要直接生成一大段完整的英文Prompt。而是列出需要**替换、删除或新增**的关键描述词。
+      4. **格式**：清晰的建议列表。
+
+      版权规避建议原文：${originalSuggestion}
     `;
 
-    const response = await ai.models.generateContent({
+    const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: prompt,
-    });
+    }));
     
-    return response.text || "";
+    return response.text || "无法生成建议，请参考原始分析报告。";
 }
