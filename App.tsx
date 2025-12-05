@@ -481,7 +481,7 @@ const App: React.FC = () => {
                 <ShieldCheck size={40} />
               </div>
               <h3 className="text-xl font-bold text-slate-800 mb-2">上传待检测图片</h3>
-              <p className="text-slate-500 mb-6">系统将自动运行 pHash 快速查重与 Gemini 深度语义鉴定。</p>
+              <p className="text-slate-500 mb-6">系统将自动运行快速查重与深度语义鉴定。</p>
               <button className="bg-blue-600 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-blue-200 group-hover:shadow-blue-300 transition-transform active:scale-95">
                 上传文件
               </button>
